@@ -1,0 +1,24 @@
+1 ICON "monpresso.ico"
+1 24 "monpresso.manifest"
+
+1 VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "MonPresso screenshot tool"
+      VALUE "ProductName", "MonPresso"
+      VALUE "FileVersion", "1.0.0"
+      VALUE "ProductVersion", "1.0.0"
+      VALUE "LegalCopyright", "MIT License"
+      VALUE "OriginalFilename", "MonPresso.exe"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
