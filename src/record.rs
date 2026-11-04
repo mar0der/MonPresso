@@ -1,30 +1,32 @@
-//! Screen recording through FFmpeg (gdigrab), with an on-screen frame and stop button
-//! that are hidden from the capture itself.
+//! Screen recording with the built-in encoders (MP4 or GIF), plus the on-screen frame
+//! and stop button, which are hidden from the recording itself.
 
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::path::PathBuf;
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
-use crate::util::SS_CENTERIMAGE;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::image::Rect;
+use crate::image::{self, Rect};
+use crate::util::SS_CENTERIMAGE;
 use crate::util::{self, w};
+use crate::video;
 
 const FRAME_CLASS: &str = "MonPressoRecFrame";
 const PANEL_CLASS: &str = "MonPressoRecPanel";
 const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const ID_STOP: i32 = 1;
 const KEY: u32 = 0xFF00FF; // transparent color key for the frame window
 
 pub struct Recording {
-    child: Child,
+    worker: Option<JoinHandle<Result<(), String>>>,
+    stop: Arc<AtomicBool>,
     pub path: PathBuf,
-    log: PathBuf,
     frame: HWND,
     panel: HWND,
     label: HWND,
@@ -37,49 +39,66 @@ pub fn register() {
     util::register_class(PANEL_CLASS, Some(panel_proc), null_mut(), false);
 }
 
-pub fn find_ffmpeg(configured: &str) -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if !configured.trim().is_empty() {
-        candidates.push(PathBuf::from(configured.trim()));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("ffmpeg.exe"));
-        }
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        candidates.extend(std::env::split_paths(&path).map(|d| d.join("ffmpeg.exe")));
-    }
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        candidates.push(Path::new(&local).join("Microsoft\\WinGet\\Links\\ffmpeg.exe"));
-    }
-    candidates.into_iter().find(|p| p.is_file())
+/// Output size for an area: even dimensions, scaled down to what the format handles.
+pub fn output_size(w: i32, h: i32, gif: bool) -> (i32, i32) {
+    let (max_w, max_h) = if gif { (1600.0, 1600.0) } else { (4096.0, 2304.0) };
+    let s = (max_w / w as f64).min(max_h / h as f64).min(1.0);
+    let ow = ((w as f64 * s) as i32) & !1;
+    let oh = ((h as f64 * s) as i32) & !1;
+    (ow.max(2), oh.max(2))
 }
 
-pub fn start(ffmpeg: &Path, area: Rect, fps: u32, path: PathBuf) -> Result<Recording, String> {
-    let (wd, ht) = (area.w & !1, area.h & !1);
-    if wd < 16 || ht < 16 {
+/// Capture `area` until `stop` is set and encode it to `path`.
+pub fn record_to_file(area: Rect, fps: u32, gif: bool, path: &std::path::Path, stop: &AtomicBool) -> Result<(), String> {
+    let fps = if gif { fps.min(15) } else { fps }.clamp(5, 60);
+    let (ow, oh) = output_size(area.w, area.h, gif);
+    let interval = Duration::from_secs_f64(1.0 / fps as f64);
+    let start = Instant::now();
+    let mut next = start;
+    if gif {
+        let mut enc = video::Gif::create(path, ow, oh).map_err(|e| e.to_string())?;
+        while !stop.load(Ordering::Relaxed) {
+            let t = start.elapsed().as_millis() as u64;
+            enc.write(image::capture_scaled(area, ow, oh, true), t).map_err(|e| e.to_string())?;
+            pace(&mut next, interval);
+        }
+        enc.finish(start.elapsed().as_millis() as u64).map_err(|e| e.to_string())
+    } else {
+        video::mf_startup().map_err(|e| format!("Windows video encoder unavailable: {}", e.message()))?;
+        let result = (|| -> windows::core::Result<()> {
+            let mut enc = video::Mp4::create(path, ow, oh, fps)?;
+            let frame_100ns = interval.as_nanos() as i64 / 100;
+            while !stop.load(Ordering::Relaxed) {
+                let t = start.elapsed().as_nanos() as i64 / 100;
+                enc.write(&image::capture_scaled(area, ow, oh, true), t, frame_100ns)?;
+                pace(&mut next, interval);
+            }
+            enc.finish()
+        })();
+        video::mf_shutdown();
+        result.map_err(|e| format!("Recording failed: {}", e.message()))
+    }
+}
+
+fn pace(next: &mut Instant, interval: Duration) {
+    *next += interval;
+    let now = Instant::now();
+    if *next > now {
+        std::thread::sleep(*next - now);
+    } else {
+        *next = now; // running behind: drop frames instead of piling up
+    }
+}
+
+pub fn start(area: Rect, fps: u32, gif: bool, path: PathBuf) -> Result<Recording, String> {
+    if area.w < 16 || area.h < 16 {
         return Err("The selected area is too small to record.".into());
     }
-    let log = std::env::temp_dir().join("monpresso-ffmpeg.log");
-    let log_file = std::fs::File::create(&log).map_err(|e| e.to_string())?;
-    let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "gdigrab", "-draw_mouse", "1"])
-        .args(["-framerate", &fps.to_string()])
-        .args(["-offset_x", &area.x.to_string(), "-offset_y", &area.y.to_string()])
-        .args(["-video_size", &format!("{wd}x{ht}"), "-i", "desktop"])
-        .args(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])
-        .arg(&path)
-        // Make FFmpeg DPI aware so gdigrab coordinates are physical pixels like ours.
-        .env("__COMPAT_LAYER", "HighDpiAware")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(log_file));
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let child = cmd.spawn().map_err(|e| format!("Could not start FFmpeg: {e}"))?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let (stop, path) = (stop.clone(), path.clone());
+        std::thread::spawn(move || record_to_file(area, fps, gif, &path, &stop))
+    };
 
     unsafe {
         let dpi = util::cursor_monitor_dpi();
@@ -108,7 +127,7 @@ pub fn start(ffmpeg: &Path, area: Rect, fps: u32, path: PathBuf) -> Result<Recor
         let (pw, ph) = (util::sc(190, dpi), util::sc(38, dpi));
         let mut px = area.x + area.w - pw;
         let mut py = area.y + area.h + pad + util::sc(6, dpi);
-        let screen = crate::image::virtual_screen();
+        let screen = image::virtual_screen();
         if py + ph > screen.y + screen.h {
             py = area.y - pad - ph - util::sc(6, dpi);
         }
@@ -132,14 +151,14 @@ pub fn start(ffmpeg: &Path, area: Rect, fps: u32, path: PathBuf) -> Result<Recor
         );
         SetWindowDisplayAffinity(panel, WDA_EXCLUDEFROMCAPTURE);
         let font = util::ui_font(dpi);
-        let label = util::child(panel, "STATIC", "● REC 00:00", SS_CENTERIMAGE as u32, -1, font);
+        let label = util::child(panel, "STATIC", "● REC 00:00", SS_CENTERIMAGE, -1, font);
         util::move_win(label, util::sc(10, dpi), 0, util::sc(100, dpi), ph - 2);
-        let stop = util::child(panel, "BUTTON", "Stop", 0, ID_STOP, font);
-        util::move_win(stop, pw - util::sc(78, dpi), util::sc(5, dpi), util::sc(70, dpi), ph - util::sc(12, dpi));
+        let stop_btn = util::child(panel, "BUTTON", "Stop", 0, ID_STOP, font);
+        util::move_win(stop_btn, pw - util::sc(78, dpi), util::sc(5, dpi), util::sc(70, dpi), ph - util::sc(12, dpi));
         SetTimer(panel, 1, 500, None);
         ShowWindow(panel, SW_SHOWNOACTIVATE);
 
-        Ok(Recording { child, path, log, frame, panel, label, font, started: Instant::now() })
+        Ok(Recording { worker: Some(worker), stop, path, frame, panel, label, font, started: Instant::now() })
     }
 }
 
@@ -153,8 +172,9 @@ impl Recording {
         }
     }
 
+    /// True when the encoder stopped on its own (an error).
     pub fn has_exited(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(Some(_)))
+        self.worker.as_ref().is_some_and(|w| w.is_finished())
     }
 
     pub fn tick(&self) {
@@ -162,50 +182,22 @@ impl Recording {
         util::set_text(self.label, &format!("● REC {:02}:{:02}", secs / 60, secs % 60));
     }
 
-    /// Ask FFmpeg to finish the file and wait for it.
+    /// Stop capturing, finish the file and return its path.
     pub fn stop(mut self) -> Result<PathBuf, String> {
         self.close_ui();
-        if let Some(mut stdin) = self.child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(b"q");
-        }
-        let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-                _ => {
-                    let _ = self.child.kill();
-                    break;
-                }
-            }
-        }
+        self.stop.store(true, Ordering::Relaxed);
+        let result = match self.worker.take() {
+            Some(w) => w.join().unwrap_or_else(|_| Err("The recorder crashed.".into())),
+            None => Ok(()),
+        };
+        result?;
         let ok = std::fs::metadata(&self.path).map(|m| m.len() > 0).unwrap_or(false);
         if ok {
-            Ok(self.path)
+            Ok(self.path.clone())
         } else {
-            let log = std::fs::read_to_string(&self.log).unwrap_or_default();
-            Err(format!("FFmpeg did not produce a video.\n\n{}", log.trim()))
+            Err("The recording is empty.".into())
         }
     }
-}
-
-/// Convert an MP4 to an optimized GIF next to it and delete the MP4.
-pub fn to_gif(ffmpeg: &Path, mp4: &Path, fps: u32) -> Result<PathBuf, String> {
-    let gif = mp4.with_extension("gif");
-    let filter = format!("fps={},split[a][b];[a]palettegen[p];[b][p]paletteuse", fps.min(15));
-    let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"]).arg(mp4).args(["-vf", &filter]).arg(&gif);
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let out = cmd.output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
-    }
-    let _ = std::fs::remove_file(mp4);
-    Ok(gif)
 }
 
 unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {

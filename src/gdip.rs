@@ -98,6 +98,10 @@ extern "system" {
     fn GdipBitmapLockBits(bitmap: Gp, rect: *const GpRect, flags: u32, format: i32, data: *mut BitmapData) -> i32;
     fn GdipBitmapUnlockBits(bitmap: Gp, data: *mut BitmapData) -> i32;
     fn GdipDisposeImage(image: Gp) -> i32;
+    #[cfg(test)]
+    fn GdipImageGetFrameCount(image: Gp, dimension: *const Guid, count: *mut u32) -> i32;
+    #[cfg(test)]
+    fn GdipImageSelectActiveFrame(image: Gp, dimension: *const Guid, index: u32) -> i32;
     fn GdipSaveImageToFile(image: Gp, file: *const u16, clsid: *const Guid, params: *const EncoderParameters) -> i32;
     fn GdipGetImageGraphicsContext(image: Gp, graphics: *mut Gp) -> i32;
     fn GdipDeleteGraphics(graphics: Gp) -> i32;
@@ -192,6 +196,41 @@ pub fn load_image(path: &str) -> Option<Image> {
         }
         GdipDisposeImage(bmp);
         ok.then_some(img)
+    }
+}
+
+/// Frame `index` of an animated image plus the frame count (GIF decoding check).
+#[cfg(test)]
+pub fn load_frame(path: &str, index: u32) -> Option<(Image, u32)> {
+    let time = Guid { d1: 0x6AEDBD6D, d2: 0x3FB5, d3: 0x418A, d4: [0x83, 0xA6, 0x7F, 0x45, 0x22, 0x9D, 0xC8, 0x72] };
+    let wpath = w(path);
+    unsafe {
+        let mut bmp: Gp = null_mut();
+        if GdipCreateBitmapFromFile(wpath.as_ptr(), &mut bmp) != 0 || bmp.is_null() {
+            return None;
+        }
+        let mut count = 0u32;
+        GdipImageGetFrameCount(bmp, &time, &mut count);
+        GdipImageSelectActiveFrame(bmp, &time, index);
+        let (mut iw, mut ih) = (0u32, 0u32);
+        GdipGetImageWidth(bmp, &mut iw);
+        GdipGetImageHeight(bmp, &mut ih);
+        let mut img = Image::new(iw as i32, ih as i32);
+        let rect = GpRect { x: 0, y: 0, w: iw as i32, h: ih as i32 };
+        let mut data = BitmapData {
+            width: iw,
+            height: ih,
+            stride: iw as i32 * 4,
+            format: PARGB,
+            scan0: img.px.as_mut_ptr() as *mut c_void,
+            reserved: 0,
+        };
+        let ok = GdipBitmapLockBits(bmp, &rect, LOCK_READ | LOCK_USER_BUFFER, PARGB, &mut data) == 0;
+        if ok {
+            GdipBitmapUnlockBits(bmp, &mut data);
+        }
+        GdipDisposeImage(bmp);
+        ok.then_some((img, count))
     }
 }
 

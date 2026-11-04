@@ -110,7 +110,7 @@ fn bar_items() -> Vec<Item> {
         Item::new(ID_AREA, Look::Stacked, Some(Icon::Area), "Capture area", "Select an area or click a window"),
         Item::new(ID_FULL, Look::Stacked, Some(Icon::Screen), "Full screen", "Capture every screen"),
         Item::new(ID_LAST, Look::Stacked, Some(Icon::LastArea), "Last area", "Capture the same area again"),
-        Item::new(ID_RECORD, Look::Stacked, Some(Icon::Record), "Record video", "Record an area of the screen (needs FFmpeg)"),
+        Item::new(ID_RECORD, Look::Stacked, Some(Icon::Record), "Record video", "Record an area of the screen to MP4 or GIF"),
         Item::new(0, Look::Spacer, None, "", ""),
         Item::new(ID_FOLDER, Look::IconText, Some(Icon::Folder), "Open folder", "Open the capture folder in Explorer"),
         Item::new(ID_SETTINGS, Look::IconText, Some(Icon::Settings), "Settings", "Hotkeys, folders and video options"),

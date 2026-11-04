@@ -389,14 +389,6 @@ pub fn toggle_recording() {
         return;
     }
     let s = settings();
-    let Some(ffmpeg) = record::find_ffmpeg(&s.ffmpeg_path) else {
-        util::msgbox(
-            null_mut(),
-            "Video recording uses FFmpeg, which was not found.\n\nInstall it from a terminal with:\n    winget install Gyan.FFmpeg\n\nthen try again, or set the path to ffmpeg.exe in Settings.",
-            MB_ICONINFORMATION,
-        );
-        return;
-    };
     BUSY.with(|b| b.set(true));
     let hidden = hide_workspace();
     if hidden {
@@ -410,8 +402,9 @@ pub fn toggle_recording() {
     BUSY.with(|b| b.set(false));
     let Some(area) = area else { return };
     let _ = std::fs::create_dir_all(&s.save_folder);
-    let path = PathBuf::from(new_path(&s.save_folder, "mp4"));
-    match record::start(&ffmpeg, area, s.video_fps, path) {
+    let gif = s.video_format == "gif";
+    let path = PathBuf::from(new_path(&s.save_folder, if gif { "gif" } else { "mp4" }));
+    match record::start(area, s.video_fps, gif, path) {
         Ok(rec) => {
             RECORDING.with(|r| *r.borrow_mut() = Some(rec));
             unsafe { tray(NIM_MODIFY) };
@@ -424,19 +417,8 @@ pub fn toggle_recording() {
 
 fn finish_recording(rec: Recording) {
     unsafe { tray(NIM_MODIFY) };
-    let s = settings();
     match rec.stop() {
-        Ok(mut path) => {
-            if s.video_format == "gif" {
-                if let Some(ffmpeg) = record::find_ffmpeg(&s.ffmpeg_path) {
-                    match record::to_gif(&ffmpeg, &path, s.video_fps) {
-                        Ok(gif) => path = gif,
-                        Err(e) => {
-                            util::msgbox(null_mut(), &format!("GIF conversion failed; the MP4 was kept.\n\n{e}"), MB_ICONWARNING);
-                        }
-                    }
-                }
-            }
+        Ok(path) => {
             workspace::refresh();
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             balloon("Recording saved", &name);

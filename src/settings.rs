@@ -8,7 +8,6 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Registry::*;
-use windows_sys::Win32::UI::Controls::Dialogs::*;
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -33,7 +32,6 @@ pub struct Settings {
     /// Matched (case-insensitively) against the full path of the target app's exe.
     pub claude_app: String,
     pub codex_app: String,
-    pub ffmpeg_path: String,
     pub video_format: String,
     pub video_fps: u32,
     pub start_with_windows: bool,
@@ -57,7 +55,6 @@ impl Default for Settings {
             hotkey_codex: String::new(),
             claude_app: "\\claude.exe".into(),
             codex_app: "openai.codex".into(),
-            ffmpeg_path: String::new(),
             video_format: "mp4".into(),
             video_fps: 30,
             start_with_windows: false,
@@ -113,7 +110,6 @@ impl Settings {
                 "hotkey_codex" => s.hotkey_codex = v,
                 "claude_app" if !v.is_empty() => s.claude_app = v,
                 "codex_app" if !v.is_empty() => s.codex_app = v,
-                "ffmpeg_path" => s.ffmpeg_path = v,
                 "video_format" => s.video_format = if v == "gif" { v } else { "mp4".into() },
                 "video_fps" => s.video_fps = v.parse().unwrap_or(30).clamp(5, 60),
                 "start_with_windows" => s.start_with_windows = yes(&v),
@@ -132,7 +128,7 @@ impl Settings {
             "save_folder={}\nimage_format={}\ncopy_to_clipboard={}\nopen_editor={}\ninclude_cursor={}\n\
              delay_seconds={}\nhotkey_area={}\nhotkey_fullscreen={}\nhotkey_window={}\nhotkey_last_area={}\n\
              hotkey_record={}\nhotkey_claude={}\nhotkey_codex={}\nclaude_app={}\ncodex_app={}\n\
-             ffmpeg_path={}\nvideo_format={}\nvideo_fps={}\nstart_with_windows={}\n",
+             video_format={}\nvideo_fps={}\nstart_with_windows={}\n",
             self.save_folder,
             self.image_format,
             self.copy_to_clipboard,
@@ -148,7 +144,6 @@ impl Settings {
             self.hotkey_codex,
             self.claude_app,
             self.codex_app,
-            self.ffmpeg_path,
             self.video_format,
             self.video_fps,
             self.start_with_windows
@@ -203,8 +198,6 @@ const ID_EDITOR: i32 = 14;
 const ID_CURSOR: i32 = 15;
 const ID_DELAY: i32 = 16;
 const ID_HK_BASE: i32 = 20;
-const ID_FFMPEG: i32 = 30;
-const ID_BROWSE_FFMPEG: i32 = 31;
 const ID_VFORMAT: i32 = 32;
 const ID_FPS: i32 = 33;
 const ID_STARTUP: i32 = 34;
@@ -353,19 +346,15 @@ unsafe fn build(hwnd: HWND, d: &mut Dialog, s: &Settings, dpi: i32) {
 
     place(heading("Video"), lx, y, full, sc(26));
     y += sc(36);
-    field_label("FFmpeg", y);
-    place(edit(&s.ffmpeg_path, ID_FFMPEG), cx, y, full - sc(96), sc(26));
-    place(button("Browse…", ID_BROWSE_FFMPEG), cx + full - sc(88), y - 1, sc(88), sc(28));
-    y += sc(30);
-    place(hint("Empty = ffmpeg.exe from PATH or next to MonPresso.exe  (winget install Gyan.FFmpeg)"), cx, y, full, sc(18));
-    y += sc(28);
     field_label("Format", y);
     let vsel = if s.video_format == "gif" { 1 } else { 0 };
     place(combo(ID_VFORMAT, &["MP4 video".into(), "Animated GIF".into()], vsel), cx, y, sc(160), sc(200));
     let fps: Vec<String> = FPS.iter().map(|f| format!("{f} fps")).collect();
     let fsel = FPS.iter().position(|f| *f == s.video_fps).unwrap_or(2);
     place(combo(ID_FPS, &fps, fsel), cx + sc(170), y, sc(100), sc(200));
-    y += sc(48);
+    y += sc(30);
+    place(hint("Recorded by MonPresso itself; nothing else to install. GIFs use up to 15 fps."), cx, y, full, sc(18));
+    y += sc(38);
 
     place(heading("General"), lx, y, full, sc(26));
     y += sc(36);
@@ -428,7 +417,6 @@ unsafe fn collect(hwnd: HWND) -> Result<Settings, String> {
     s.hotkey_record = hk[4].clone();
     s.hotkey_claude = hk[5].clone();
     s.hotkey_codex = hk[6].clone();
-    s.ffmpeg_path = util::get_text(control(hwnd, ID_FFMPEG)).trim().to_string();
     s.video_format = if selected(hwnd, ID_VFORMAT) == 1 { "gif" } else { "mp4" }.into();
     s.video_fps = FPS[selected(hwnd, ID_FPS).min(FPS.len() - 1)];
     Ok(s)
@@ -451,21 +439,6 @@ unsafe fn browse_folder(hwnd: HWND) {
     CoTaskMemFree(pidl as *const _);
 }
 
-unsafe fn browse_ffmpeg(hwnd: HWND) {
-    let mut buf = [0u16; 1024];
-    let filter: Vec<u16> = "ffmpeg.exe\0ffmpeg.exe\0Programs\0*.exe\0\0".encode_utf16().collect();
-    let mut ofn: OPENFILENAMEW = std::mem::zeroed();
-    ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-    ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = filter.as_ptr();
-    ofn.lpstrFile = buf.as_mut_ptr();
-    ofn.nMaxFile = buf.len() as u32;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    if GetOpenFileNameW(&mut ofn) != 0 {
-        util::set_text(control(hwnd, ID_FFMPEG), &util::from_w(&buf));
-    }
-}
-
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_COMMAND => {
@@ -483,7 +456,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     DestroyWindow(hwnd);
                 }
                 ID_BROWSE_FOLDER => browse_folder(hwnd),
-                ID_BROWSE_FFMPEG => browse_ffmpeg(hwnd),
                 _ => {}
             }
             return 0;

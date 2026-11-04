@@ -146,6 +146,47 @@ pub fn capture(r: Rect, cursor: bool) -> Image {
     img
 }
 
+/// Grab a screen rectangle scaled to `ow` x `oh` (used when a video frame must be smaller).
+pub fn capture_scaled(r: Rect, ow: i32, oh: i32, cursor: bool) -> Image {
+    if ow == r.w && oh == r.h {
+        return capture(r, cursor);
+    }
+    let mut img = Image::new(ow, oh);
+    unsafe {
+        let screen = GetDC(null_mut());
+        let mem = CreateCompatibleDC(screen);
+        let bmi = bitmap_info(ow, oh);
+        let mut bits = null_mut();
+        let hbm = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+        let old = SelectObject(mem, hbm as HGDIOBJ);
+        SetStretchBltMode(mem, HALFTONE);
+        SetBrushOrgEx(mem, 0, 0, null_mut());
+        StretchBlt(mem, 0, 0, ow, oh, screen, r.x, r.y, r.w, r.h, SRCCOPY | CAPTUREBLT);
+        if cursor {
+            // Place the (unscaled) pointer where it sits in the scaled frame.
+            let mut ci: CURSORINFO = std::mem::zeroed();
+            ci.cbSize = std::mem::size_of::<CURSORINFO>() as u32;
+            if GetCursorInfo(&mut ci) != 0 {
+                let sx = (ci.ptScreenPos.x - r.x) as i64 * ow as i64 / r.w as i64;
+                let sy = (ci.ptScreenPos.y - r.y) as i64 * oh as i64 / r.h as i64;
+                draw_cursor(mem, ci.ptScreenPos.x - sx as i32, ci.ptScreenPos.y - sy as i32);
+            }
+        }
+        GdiFlush();
+        if !bits.is_null() {
+            std::ptr::copy_nonoverlapping(bits as *const u32, img.px.as_mut_ptr(), img.px.len());
+        }
+        SelectObject(mem, old);
+        DeleteObject(hbm as HGDIOBJ);
+        DeleteDC(mem);
+        ReleaseDC(null_mut(), screen);
+    }
+    for p in img.px.iter_mut() {
+        *p |= 0xFF00_0000;
+    }
+    img
+}
+
 unsafe fn draw_cursor(dc: HDC, ox: i32, oy: i32) {
     let mut ci: CURSORINFO = std::mem::zeroed();
     ci.cbSize = std::mem::size_of::<CURSORINFO>() as u32;

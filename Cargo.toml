@@ -39,6 +39,9 @@ windows = { version = "0.58", features = [
     "Graphics_Imaging",
     "Media_Ocr",
     "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
 ] }
 
 [build-dependencies]

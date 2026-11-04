@@ -15,6 +15,7 @@ mod record;
 mod settings;
 mod ui;
 mod util;
+mod video;
 mod workspace;
 
 fn main() {
