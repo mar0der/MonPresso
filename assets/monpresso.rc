@@ -2,8 +2,8 @@
 1 24 "monpresso.manifest"
 
 1 VERSIONINFO
-FILEVERSION 1,3,0,0
-PRODUCTVERSION 1,3,0,0
+FILEVERSION 1,3,1,0
+PRODUCTVERSION 1,3,1,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -11,8 +11,8 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "MonPresso screenshot tool"
       VALUE "ProductName", "MonPresso"
-      VALUE "FileVersion", "1.3.0"
-      VALUE "ProductVersion", "1.3.0"
+      VALUE "FileVersion", "1.3.1"
+      VALUE "ProductVersion", "1.3.1"
       VALUE "LegalCopyright", "MIT License"
       VALUE "OriginalFilename", "MonPresso.exe"
     END
