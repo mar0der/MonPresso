@@ -37,6 +37,7 @@ const ID_SAVE_AS: i32 = 406;
 const ID_SAVE: i32 = 407;
 const ID_ZOOM_OUT: i32 = 408;
 const ID_ZOOM_IN: i32 = 409;
+const ID_FILL: i32 = 313;
 const ID_TEXT_EDIT: i32 = 600;
 
 const SWATCHES: [u32; 8] = [0xFFE53935, 0xFFFB8C00, 0xFFFDD835, 0xFF43A047, 0xFF1E88E5, 0xFF8E24AA, 0xFF212121, 0xFFFFFFFF];
@@ -96,9 +97,83 @@ struct Ann {
     color: u32,
     width: f32,
     size: f32,
+    /// Rectangles and ellipses: fill solid with `color`.
+    fill: bool,
+}
+
+/// Grips on a selected shape: line/arrow end points or the 8 points of a box.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Handle {
+    Start,
+    End,
+    N,
+    S,
+    E,
+    W,
+    NE,
+    NW,
+    SE,
+    SW,
 }
 
 impl Ann {
+    fn is_box(&self) -> bool {
+        matches!(self.tool, Tool::Rect | Tool::Ellipse | Tool::Marker | Tool::Blur | Tool::Spot)
+    }
+
+    fn handles(&self) -> Vec<(Handle, P)> {
+        match self.tool {
+            Tool::Line | Tool::Arrow => vec![(Handle::Start, self.a), (Handle::End, self.b)],
+            _ if self.is_box() => {
+                let r = self.rect();
+                let (x1, y1, x2, y2) = (r.x, r.y, r.x + r.w, r.y + r.h);
+                let (mx, my) = ((x1 + x2) / 2.0, (y1 + y2) / 2.0);
+                let p = |x, y| P { x, y };
+                vec![
+                    (Handle::NW, p(x1, y1)),
+                    (Handle::N, p(mx, y1)),
+                    (Handle::NE, p(x2, y1)),
+                    (Handle::E, p(x2, my)),
+                    (Handle::SE, p(x2, y2)),
+                    (Handle::S, p(mx, y2)),
+                    (Handle::SW, p(x1, y2)),
+                    (Handle::W, p(x1, my)),
+                ]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Make `a` the top-left and `b` the bottom-right corner of a box.
+    fn normalize(&mut self) {
+        if self.is_box() {
+            let r = self.rect();
+            self.a = P { x: r.x, y: r.y };
+            self.b = P { x: r.x + r.w, y: r.y + r.h };
+        }
+    }
+
+    fn drag_handle(&mut self, h: Handle, p: P, shift: bool) {
+        match h {
+            Handle::Start => self.a = if shift { snap45(self.b, p) } else { p },
+            Handle::End => self.b = if shift { snap45(self.a, p) } else { p },
+            Handle::N => self.a.y = p.y,
+            Handle::S => self.b.y = p.y,
+            Handle::W => self.a.x = p.x,
+            Handle::E => self.b.x = p.x,
+            Handle::NW => self.a = p,
+            Handle::SE => self.b = p,
+            Handle::NE => {
+                self.a.y = p.y;
+                self.b.x = p.x;
+            }
+            Handle::SW => {
+                self.a.x = p.x;
+                self.b.y = p.y;
+            }
+        }
+    }
+
     fn rect(&self) -> RectF {
         RectF {
             x: self.a.x.min(self.b.x),
@@ -284,8 +359,18 @@ fn draw(c: &Canvas, img: &mut Image, a: &Ann) {
     match a.tool {
         Tool::Arrow => draw_arrow(c, a.a, a.b, col, a.width),
         Tool::Line => c.line(pf(a.a), pf(a.b), col, a.width),
-        Tool::Rect => c.rect(a.rect(), col, a.width),
-        Tool::Ellipse => c.ellipse(a.rect(), col, a.width),
+        Tool::Rect => {
+            if a.fill {
+                c.fill_rect(a.rect(), col);
+            }
+            c.rect(a.rect(), col, a.width);
+        }
+        Tool::Ellipse => {
+            if a.fill {
+                c.fill_ellipse(a.rect(), col);
+            }
+            c.ellipse(a.rect(), col, a.width);
+        }
         Tool::Pen => {
             let pts: Vec<PointF> = a.pts.iter().map(|p| pf(*p)).collect();
             c.polyline(&pts, col, a.width);
@@ -353,6 +438,7 @@ enum Drag {
     None,
     Draw(Ann),
     Move { last: P, moved: bool, was_dirty: bool },
+    Handle { handle: Handle, moved: bool, was_dirty: bool },
     Crop { a: P, b: P },
 }
 
@@ -377,6 +463,7 @@ struct Editor {
     color: u32,
     width: f32,
     font_size: f32,
+    fill: bool,
     custom_colors: [u32; 16],
     zoom: f32,
     scroll: (i32, i32),
@@ -443,6 +530,7 @@ pub fn open(path: Option<String>, img: Image) {
             color: SWATCHES[0],
             width: WIDTHS[1].0,
             font_size: 24.0,
+            fill: false,
             custom_colors: [0xFFFFFF; 16],
             zoom: 1.0,
             scroll: (0, 0),
@@ -501,6 +589,7 @@ fn toolbar_items() -> Vec<Item> {
     for (i, (wd, dot)) in WIDTHS.iter().enumerate() {
         v.push(Item::new(ID_WIDTH + i as i32, Look::Dot(*dot), None, "", &format!("Line width {wd}")));
     }
+    v.push(Item::new(ID_FILL, Look::Icon, Some(Icon::Fill), "", "Fill rectangles and ellipses with the color  (F)"));
     v.push(sep());
     v.push(Item::new(ID_FONT_DOWN, Look::Icon, Some(Icon::FontDown), "", "Smaller text and steps"));
     v.push(Item::new(ID_FONT_LABEL, Look::Label, None, "24", ""));
@@ -575,7 +664,7 @@ fn serialize_annotations(items: &[Ann]) -> String {
         let Some((_, name)) = TOOL_NAMES.iter().find(|(t, _)| *t == a.tool) else { continue };
         let pts: Vec<String> = a.pts.iter().map(|p| format!("{},{}", p.x, p.y)).collect();
         out.push_str(&format!(
-            "{name}\t{}\t{}\t{}\t{}\t{:08X}\t{}\t{}\t{}\t{}\t{}\n",
+            "{name}\t{}\t{}\t{}\t{}\t{:08X}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             a.a.x,
             a.a.y,
             a.b.x,
@@ -585,7 +674,8 @@ fn serialize_annotations(items: &[Ann]) -> String {
             a.size,
             a.n,
             pts.join(";"),
-            escape(&a.text)
+            escape(&a.text),
+            a.fill as u8
         ));
     }
     out
@@ -621,6 +711,7 @@ fn parse_annotations(text: &str) -> Vec<Ann> {
                 color: u32::from_str_radix(f[5].trim(), 16).ok()?,
                 width: num(f[6])?,
                 size: num(f[7])?,
+                fill: f.get(11).is_some_and(|v| v.trim() == "1"),
             })
         })
         .collect()
@@ -883,7 +974,44 @@ impl Editor {
             color: self.color,
             width: self.width,
             size: self.font_size,
+            fill: self.fill && matches!(tool, Tool::Rect | Tool::Ellipse),
         }
+    }
+
+    /// The handle of the selected shape under the mouse (screen coordinates).
+    fn handle_at(&self, mx: i32, my: i32) -> Option<(usize, Handle)> {
+        let i = self.selected?;
+        let a = self.doc.items.get(i)?;
+        let tol = self.sc(7);
+        a.handles()
+            .into_iter()
+            .find(|(_, p)| {
+                let (sx, sy) = self.to_screen(*p);
+                (sx - mx).abs() <= tol && (sy - my).abs() <= tol
+            })
+            .map(|(h, _)| (i, h))
+    }
+
+    unsafe fn begin_move(&mut self, p: P) {
+        let was_dirty = self.dirty;
+        self.push_undo();
+        self.drag = Drag::Move { last: p, moved: false, was_dirty };
+        SetCapture(self.canvas);
+    }
+
+    unsafe fn toggle_fill(&mut self) {
+        let target = self.selected.filter(|&i| matches!(self.doc.items[i].tool, Tool::Rect | Tool::Ellipse));
+        match target {
+            Some(i) => {
+                self.push_undo();
+                let a = &mut self.doc.items[i];
+                a.fill = !a.fill;
+                self.fill = a.fill;
+                self.changed();
+            }
+            None => self.fill = !self.fill,
+        }
+        self.sync_bar();
     }
 
     // ---- mouse -------------------------------------------------------------
@@ -895,6 +1023,24 @@ impl Editor {
         }
         SetFocus(self.canvas);
         let p = self.to_image(mx, my);
+        // The selected shape can be reshaped by its handles or moved by its body in any tool.
+        if let Some((i, handle)) = self.handle_at(mx, my) {
+            let was_dirty = self.dirty;
+            self.push_undo();
+            self.doc.items[i].normalize();
+            self.drag = Drag::Handle { handle, moved: false, was_dirty };
+            SetCapture(self.canvas);
+            self.refresh();
+            return;
+        }
+        if !matches!(self.tool, Tool::Select | Tool::Text | Tool::Crop) {
+            let tol = 4.0 / self.zoom;
+            if self.selected.is_some_and(|i| i < self.doc.items.len() && self.doc.items[i].hit(p, tol)) {
+                self.begin_move(p);
+                return;
+            }
+            self.selected = None;
+        }
         match self.tool {
             Tool::Select => {
                 self.selected = self.hit_test(p);
@@ -904,10 +1050,7 @@ impl Editor {
                         self.begin_text(a.a, &a.text, Some(i), a.color, a.size);
                         return;
                     }
-                    let was_dirty = self.dirty;
-                    self.push_undo();
-                    self.drag = Drag::Move { last: p, moved: false, was_dirty };
-                    SetCapture(self.canvas);
+                    self.begin_move(p);
                 }
                 self.refresh();
             }
@@ -925,6 +1068,7 @@ impl Editor {
                 a.n = n;
                 self.push_undo();
                 self.doc.items.push(a);
+                self.selected = Some(self.doc.items.len() - 1);
                 self.changed();
             }
             Tool::Crop => {
@@ -969,6 +1113,13 @@ impl Editor {
                 *moved = true;
                 self.stale = true;
             }
+            Drag::Handle { handle, moved, .. } => {
+                if let Some(i) = self.selected {
+                    self.doc.items[i].drag_handle(*handle, p, shift);
+                }
+                *moved = true;
+                self.stale = true;
+            }
             Drag::Crop { b, .. } => *b = p,
         }
         self.refresh();
@@ -983,9 +1134,10 @@ impl Editor {
                 if a.is_meaningful() {
                     self.push_undo();
                     self.doc.items.push(a);
+                    self.selected = Some(self.doc.items.len() - 1);
                 }
             }
-            Drag::Move { moved, was_dirty, .. } => {
+            Drag::Move { moved, was_dirty, .. } | Drag::Handle { moved, was_dirty, .. } => {
                 if !moved {
                     self.undo.pop();
                     self.dirty = was_dirty;
@@ -1141,7 +1293,23 @@ impl Editor {
             DeleteObject(pen as HGDIOBJ);
         };
         if let Some(i) = self.selected.filter(|&i| i < self.doc.items.len()) {
-            outline(self.doc.items[i].bounds(), PS_DOT, 1);
+            let a = &self.doc.items[i];
+            let handles = a.handles();
+            if handles.is_empty() {
+                outline(a.bounds(), PS_DOT, 1);
+            } else if a.is_box() {
+                outline(a.rect(), PS_SOLID, 1);
+            }
+            let hs = self.sc(4);
+            let accent = CreateSolidBrush(util::ACCENT);
+            let white = CreateSolidBrush(0xFFFFFF);
+            for (_, p) in handles {
+                let (x, y) = self.to_screen(p);
+                FillRect(dc, &RECT { left: x - hs - 1, top: y - hs - 1, right: x + hs + 2, bottom: y + hs + 2 }, accent);
+                FillRect(dc, &RECT { left: x - hs + 1, top: y - hs + 1, right: x + hs, bottom: y + hs }, white);
+            }
+            DeleteObject(accent as HGDIOBJ);
+            DeleteObject(white as HGDIOBJ);
         }
         if let Drag::Crop { a, b } = &self.drag {
             let r = Ann { a: *a, b: *b, ..self.new_ann(Tool::Crop, *a) }.rect();
@@ -1256,6 +1424,7 @@ impl Editor {
         for (i, (wd, _)) in WIDTHS.iter().enumerate() {
             self.bar.set_checked(ID_WIDTH + i as i32, *wd == self.width);
         }
+        self.bar.set_checked(ID_FILL, self.fill);
         self.bar.set_label(ID_FONT_LABEL, &format!("{}", self.font_size));
         self.bar.set_label(ID_ACTUAL, &format!("{:.0}%", self.zoom * 100.0));
         self.bar.set_enabled(ID_UNDO, !self.undo.is_empty());
@@ -1270,6 +1439,7 @@ impl Editor {
             x if (ID_WIDTH..ID_WIDTH + WIDTHS.len() as i32).contains(&x) => self.set_width(WIDTHS[(x - ID_WIDTH) as usize].0),
             ID_MORE_COLORS => self.pick_color(),
             ID_FONT_DOWN => self.step_font(-1),
+            ID_FILL => self.toggle_fill(),
             ID_FONT_UP => self.step_font(1),
             ID_UNDO => self.undo(),
             ID_REDO => self.redo(),
@@ -1319,6 +1489,10 @@ impl Editor {
         }
         if shift {
             return false;
+        }
+        if vk == b'F' as u16 {
+            self.toggle_fill();
+            return true;
         }
         if let Some(t) = TOOLS.iter().find(|t| t.2 as u16 == vk) {
             self.set_tool(t.0);
@@ -1609,10 +1783,28 @@ unsafe extern "system" fn canvas_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_SETCURSOR => {
             if util::loword(lp as usize) == HTCLIENT {
-                let cur = match e.tool {
-                    Tool::Select => IDC_ARROW,
-                    Tool::Text => IDC_IBEAM,
-                    _ => IDC_CROSS,
+                let mut pt = POINT { x: 0, y: 0 };
+                GetCursorPos(&mut pt);
+                ScreenToClient(hwnd, &mut pt);
+                let p = e.to_image(pt.x, pt.y);
+                let tol = 4.0 / e.zoom;
+                let over_selected = e.selected.is_some_and(|i| i < e.doc.items.len() && e.doc.items[i].hit(p, tol));
+                let cur = if let Some((_, h)) = e.handle_at(pt.x, pt.y) {
+                    match h {
+                        Handle::NW | Handle::SE => IDC_SIZENWSE,
+                        Handle::NE | Handle::SW => IDC_SIZENESW,
+                        Handle::N | Handle::S => IDC_SIZENS,
+                        Handle::E | Handle::W => IDC_SIZEWE,
+                        Handle::Start | Handle::End => IDC_SIZEALL,
+                    }
+                } else if over_selected || (e.tool == Tool::Select && e.hit_test(p).is_some()) {
+                    IDC_SIZEALL
+                } else {
+                    match e.tool {
+                        Tool::Select => IDC_ARROW,
+                        Tool::Text => IDC_IBEAM,
+                        _ => IDC_CROSS,
+                    }
                 };
                 SetCursor(LoadCursorW(null_mut(), cur));
                 return 1;
@@ -1651,7 +1843,7 @@ mod tests {
     use super::*;
 
     fn ann(tool: Tool, a: P, b: P) -> Ann {
-        Ann { tool, a, b, pts: Vec::new(), text: String::new(), n: 1, color: 0xFFE53935, width: 4.0, size: 24.0 }
+        Ann { tool, a, b, pts: Vec::new(), text: String::new(), n: 1, color: 0xFFE53935, width: 4.0, size: 24.0, fill: false }
     }
 
     fn checker(w: i32, h: i32) -> Image {
@@ -1697,6 +1889,33 @@ mod tests {
     }
 
     #[test]
+    fn handles_reshape_shapes_and_fill_paints_solid() {
+        gdip::startup();
+        // Box handles resize from the dragged side only, even after the box was drawn backwards.
+        let mut r = ann(Tool::Rect, P { x: 50.0, y: 40.0 }, P { x: 10.0, y: 10.0 });
+        r.normalize();
+        assert!(r.a == P { x: 10.0, y: 10.0 } && r.b == P { x: 50.0, y: 40.0 });
+        r.drag_handle(Handle::E, P { x: 80.0, y: 99.0 }, false);
+        assert!(r.a == P { x: 10.0, y: 10.0 } && r.b == P { x: 80.0, y: 40.0 });
+        r.drag_handle(Handle::NW, P { x: 0.0, y: 5.0 }, false);
+        assert!(r.a == P { x: 0.0, y: 5.0 });
+        assert_eq!(r.handles().len(), 8);
+        // Line end points move independently.
+        let mut l = ann(Tool::Line, P { x: 0.0, y: 0.0 }, P { x: 10.0, y: 0.0 });
+        l.drag_handle(Handle::End, P { x: 30.0, y: 5.0 }, false);
+        assert!(l.a == P { x: 0.0, y: 0.0 } && l.b == P { x: 30.0, y: 5.0 });
+        assert_eq!(l.handles().len(), 2);
+        // A filled rectangle covers its inside with solid color.
+        let base = checker(40, 40);
+        let mut f = ann(Tool::Rect, P { x: 5.0, y: 5.0 }, P { x: 35.0, y: 35.0 });
+        f.fill = true;
+        let out = render(&base, &[f], None, None);
+        for (x, y) in [(10, 10), (11, 10), (20, 20), (30, 29)] {
+            assert_eq!(out.pixel(x, y) & 0x00FF_FFFF, 0x00E5_3935, "pixel {x},{y}");
+        }
+    }
+
+    #[test]
     fn crop_and_hit_test() {
         let base = checker(50, 40);
         let c = base.crop(Rect::new(10, 5, 20, 10));
@@ -1716,12 +1935,15 @@ mod tests {
         pen.pts = vec![P { x: 1.0, y: 2.0 }, P { x: 3.5, y: 4.25 }];
         let mut step = ann(Tool::Step, P { x: 40.0, y: 40.0 }, P { x: 40.0, y: 40.0 });
         step.n = 7;
-        let items = vec![ann(Tool::Arrow, P { x: 0.0, y: 0.0 }, P { x: 20.0, y: 10.0 }), text, pen, step];
+        let mut filled = ann(Tool::Rect, P { x: 2.0, y: 2.0 }, P { x: 9.0, y: 9.0 });
+        filled.fill = true;
+        let items = vec![ann(Tool::Arrow, P { x: 0.0, y: 0.0 }, P { x: 20.0, y: 10.0 }), text, pen, step, filled];
         let back = parse_annotations(&serialize_annotations(&items));
         assert_eq!(back.len(), items.len());
         for (a, b) in items.iter().zip(&back) {
             assert!(a.tool == b.tool && a.a == b.a && a.b == b.b && a.pts == b.pts);
             assert_eq!((a.text.as_str(), a.n, a.color, a.width, a.size), (b.text.as_str(), b.n, b.color, b.width, b.size));
+            assert_eq!(a.fill, b.fill);
         }
 
         let dir = std::env::temp_dir().join(format!("monpresso-sidecar-{}", std::process::id()));
@@ -1733,7 +1955,7 @@ mod tests {
         assert!(crate::project::has(&image));
         let (loaded, txt) = crate::project::load(&image).expect("sidecar");
         assert_eq!(loaded.px, base.px);
-        assert_eq!(parse_annotations(&txt).len(), 4);
+        assert_eq!(parse_annotations(&txt).len(), 5);
         assert_eq!(crate::project::files(&image).len(), 2);
         crate::project::remove(&image);
         assert!(!crate::project::has(&image));

@@ -185,6 +185,7 @@ pub enum Icon {
     ZoomOut,
     FontDown,
     FontUp,
+    Fill,
     Plus,
     Area,
     Screen,
@@ -309,6 +310,10 @@ pub fn draw_icon(c: &Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
         Icon::FontDown => {
             c.text_centered(r(1.0, 4.0, 15.0, 17.0), "A", 12.0 * s, color);
             line((16.5, 12.0), (21.5, 12.0));
+        }
+        Icon::Fill => {
+            c.fill_round(r(3.5, 6.0, 17.0, 12.0), 2.0 * s, (color & 0x00FF_FFFF) | 0x6600_0000);
+            c.stroke_round(r(3.5, 6.0, 17.0, 12.0), 2.0 * s, color, sw);
         }
         Icon::FontUp => {
             c.text_centered(r(0.0, 2.0, 15.0, 19.0), "A", 16.0 * s, color);
