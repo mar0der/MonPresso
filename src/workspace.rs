@@ -50,15 +50,21 @@ struct Card {
     badge: &'static str,
     day: i64,
     day_title: String,
+    editable: bool,
     thumb: Option<Image>,
     rect: RECT,
 }
 
 impl Card {
     fn meta(&self) -> String {
-        match self.dims {
+        let base = match self.dims {
             Some((w, h)) => format!("{}  ·  {} × {}  ·  {}", self.time, w, h, self.size),
             None => format!("{}  ·  {}", self.time, self.size),
+        };
+        if self.editable {
+            format!("{base}  ·  editable")
+        } else {
+            base
         }
     }
 }
@@ -348,7 +354,7 @@ impl Workspace {
                 let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
                 Card {
                     name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                    path,
+                    path: path.clone(),
                     time,
                     size: human_size(len),
                     dims: None,
@@ -359,6 +365,7 @@ impl Workspace {
                     },
                     day,
                     day_title,
+                    editable: crate::project::has(&path),
                     thumb: None,
                     rect: RECT { left: 0, top: 0, right: 0, bottom: 0 },
                 }
@@ -652,7 +659,14 @@ impl Workspace {
             CMD_SHOW => util::show_in_folder(&first),
             CMD_DELETE => {
                 let mut list: Vec<u16> = Vec::new();
+                let mut targets: Vec<String> = Vec::new();
                 for p in &sel {
+                    targets.push(p.clone());
+                    for extra in crate::project::files(Path::new(p)) {
+                        targets.push(extra.to_string_lossy().into_owned());
+                    }
+                }
+                for p in &targets {
                     list.extend(p.encode_utf16());
                     list.push(0);
                 }

@@ -429,6 +429,9 @@ pub struct Bar {
     tip: HWND,
     tips: usize,
     tracking: bool,
+    vertical: bool,
+    /// Position of the bar inside the owner window (item rects are bar-local).
+    origin: (i32, i32),
 }
 
 const EMPTY: RECT = RECT { left: 0, top: 0, right: 0, bottom: 0 };
@@ -453,7 +456,38 @@ impl Bar {
             )
         };
         unsafe { SendMessageW(tip, TTM_SETMAXTIPWIDTH, 0, 420) };
-        Bar { items, hover: None, press: None, height: 0, tip, tips: 0, tracking: false }
+        Bar { items, hover: None, press: None, height: 0, tip, tips: 0, tracking: false, vertical: false, origin: (0, 0) }
+    }
+
+    /// A side panel: items stacked top to bottom.
+    pub fn new_vertical(owner: HWND, items: Vec<Item>) -> Bar {
+        let mut bar = Bar::new(owner, items);
+        bar.vertical = true;
+        bar
+    }
+
+    /// Lay a vertical panel out at (x, y) in the owner window.
+    pub fn layout_vertical(&mut self, owner: HWND, x: i32, y: i32, width: i32, height: i32, dpi: i32) {
+        let sc = |v: i32| util::sc(v, dpi);
+        self.origin = (x, y);
+        self.height = height;
+        let pad = sc(8);
+        let mut top = sc(10);
+        for it in &mut self.items {
+            let h = match it.look {
+                Look::Primary => sc(40),
+                Look::Stacked => sc(62),
+                Look::Sep => sc(13),
+                _ => sc(40),
+            };
+            it.rect = RECT { left: pad, top, right: width - pad, bottom: top + h };
+            top += h + sc(4);
+        }
+        self.sync_tooltips(owner);
+    }
+
+    pub fn origin(&self) -> (i32, i32) {
+        self.origin
     }
 
     pub fn find(&mut self, id: i32) -> Option<&mut Item> {
@@ -581,7 +615,12 @@ impl Bar {
                 ti.uFlags = TTF_SUBCLASS;
                 ti.hwnd = owner;
                 ti.uId = id;
-                ti.rect = it.rect;
+                ti.rect = RECT {
+                    left: it.rect.left + self.origin.0,
+                    top: it.rect.top + self.origin.1,
+                    right: it.rect.right + self.origin.0,
+                    bottom: it.rect.bottom + self.origin.1,
+                };
                 ti.lpszText = texts.last_mut().unwrap().as_mut_ptr();
                 SendMessageW(self.tip, TTM_ADDTOOLW, 0, &ti as *const _ as LPARAM);
             }
@@ -635,8 +674,13 @@ impl Bar {
         let sc = |v: i32| util::sc(v, dpi) as f32;
         {
             let c = s.canvas();
-            c.fill_rect(RectF { x: 0.0, y: 0.0, w: s.w as f32, h: self.height as f32 }, theme::PANEL);
-            c.fill_rect(RectF { x: 0.0, y: self.height as f32 - 1.0, w: s.w as f32, h: 1.0 }, theme::BORDER);
+            if self.vertical {
+                c.fill_rect(RectF { x: 0.0, y: 0.0, w: s.w as f32, h: s.h as f32 }, theme::PANEL);
+                c.fill_rect(RectF { x: 0.0, y: 0.0, w: 1.0, h: s.h as f32 }, theme::BORDER);
+            } else {
+                c.fill_rect(RectF { x: 0.0, y: 0.0, w: s.w as f32, h: self.height as f32 }, theme::PANEL);
+                c.fill_rect(RectF { x: 0.0, y: self.height as f32 - 1.0, w: s.w as f32, h: 1.0 }, theme::BORDER);
+            }
             for (i, it) in self.items.iter().enumerate() {
                 let r = rf(&it.rect);
                 let hover = self.hover == Some(i) && it.enabled;
@@ -646,6 +690,10 @@ impl Bar {
                     continue;
                 }
                 match it.look {
+                    Look::Sep if self.vertical => {
+                        let y = r.y + r.h / 2.0;
+                        c.fill_rect(RectF { x: r.x + sc(6), y, w: r.w - sc(12), h: 1.0 }, theme::BORDER);
+                    }
                     Look::Sep => {
                         let x = r.x + r.w / 2.0;
                         c.fill_rect(RectF { x, y: r.y + sc(6), w: 1.0, h: r.h - sc(12) }, theme::BORDER);
@@ -687,7 +735,8 @@ impl Bar {
                         };
                         c.fill_round(r, radius, bg);
                         if let Some(icon) = it.icon {
-                            draw_icon(&c, icon, r.x + sc(12), r.y + (r.h - sc(20)) / 2.0, sc(20), 0xFFFFFFFF);
+                            let x0 = primary_start(&it.rect, &it.label, dpi, fonts) as f32;
+                            draw_icon(&c, icon, x0, r.y + (r.h - sc(20)) / 2.0, sc(20), 0xFFFFFFFF);
                         }
                     }
                     Look::Brand => {}
@@ -734,7 +783,7 @@ impl Bar {
                     s.text(fonts.normal, &it.label, tr, color, single | DT_LEFT);
                 }
                 Look::Primary => {
-                    let tr = RECT { left: r.left + sci(12 + 20 + 7), ..r };
+                    let tr = RECT { left: primary_start(&r, &it.label, dpi, fonts) + sci(20 + 7), ..r };
                     s.text(fonts.bold, &it.label, tr, 0xFFFFFFFF, single | DT_LEFT);
                 }
                 Look::Stacked => {
@@ -763,6 +812,12 @@ impl Drop for Bar {
     fn drop(&mut self) {
         unsafe { DestroyWindow(self.tip) };
     }
+}
+
+/// Left edge of the centered icon + label group of a primary button.
+fn primary_start(r: &RECT, label: &str, dpi: i32, fonts: &Fonts) -> i32 {
+    let content = util::sc(20 + 7, dpi) + text_extent(fonts.bold, label);
+    r.left + ((r.right - r.left) - content).max(0) / 2
 }
 
 pub fn luminance(c: u32) -> f32 {

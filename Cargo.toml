@@ -31,6 +31,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_SystemInformation",
     "Win32_Security",
     "Win32_System_Time",
+    "Win32_Storage_FileSystem",
 ] }
 windows = { version = "0.58", features = [
     "Foundation",

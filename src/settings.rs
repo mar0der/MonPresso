@@ -154,6 +154,20 @@ impl Settings {
                 RegDeleteValueW(hkey, name.as_ptr());
             }
             RegCloseKey(hkey);
+
+            // Mark the entry as enabled the way Task Manager / Settings > Startup apps do,
+            // so Explorer does not skip it at sign-in.
+            let approved = w("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run");
+            let mut akey: HKEY = null_mut();
+            if RegCreateKeyExW(HKEY_CURRENT_USER, approved.as_ptr(), 0, null(), 0, KEY_SET_VALUE, null(), &mut akey, null_mut()) == 0 {
+                if self.start_with_windows {
+                    let enabled: [u8; 12] = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+                    RegSetValueExW(akey, name.as_ptr(), 0, REG_BINARY, enabled.as_ptr(), enabled.len() as u32);
+                } else {
+                    RegDeleteValueW(akey, name.as_ptr());
+                }
+                RegCloseKey(akey);
+            }
         }
     }
 }

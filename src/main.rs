@@ -10,6 +10,7 @@ mod hotkey;
 mod image;
 mod ocr;
 mod overlay;
+mod project;
 mod record;
 mod settings;
 mod ui;

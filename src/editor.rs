@@ -387,6 +387,7 @@ struct Editor {
     hidden: Option<usize>,
     text: Option<TextEdit>,
     bar: Bar,
+    side: Bar,
     toolbar_h: i32,
     fonts: Fonts,
     dpi: i32,
@@ -424,12 +425,17 @@ pub fn open(path: Option<String>, img: Image) {
             null(),
         );
         let dpi = util::dpi_of(hwnd);
-        let composite = img.clone();
+        // Reopen saved annotations as editable objects when MonPresso kept them.
+        let (img, items) = match path.as_deref().and_then(|p| crate::project::load(std::path::Path::new(p))) {
+            Some((base, text)) => (base, parse_annotations(&text)),
+            None => (img, Vec::new()),
+        };
+        let composite = render(&img, &items, None, None);
         let ed = Box::into_raw(Box::new(Editor {
             hwnd,
             canvas: null_mut(),
             path,
-            doc: Doc { base: Rc::new(img), items: Vec::new() },
+            doc: Doc { base: Rc::new(img), items },
             undo: Vec::new(),
             redo: Vec::new(),
             dirty: false,
@@ -447,6 +453,7 @@ pub fn open(path: Option<String>, img: Image) {
             hidden: None,
             text: None,
             bar: Bar::new(hwnd, toolbar_items()),
+            side: Bar::new_vertical(hwnd, side_items()),
             toolbar_h: 0,
             fonts: Fonts::new(dpi),
             dpi,
@@ -506,12 +513,117 @@ fn toolbar_items() -> Vec<Item> {
     v.push(Item::new(ID_ACTUAL, Look::Text, None, "100%", "Actual size  (Ctrl+1)"));
     v.push(Item::new(ID_ZOOM_IN, Look::Icon, Some(Icon::ZoomIn), "", "Zoom in  (Ctrl++)"));
     v.push(Item::new(ID_FIT, Look::Icon, Some(Icon::Fit), "", "Fit to window  (Ctrl+0)"));
-    v.push(sep());
-    v.push(Item::new(ID_OCR, Look::Icon, Some(Icon::Ocr), "", "Copy the text in this image (OCR)"));
-    v.push(Item::new(ID_COPY, Look::IconText, Some(Icon::Copy), "Copy", "Copy image  (Ctrl+C)"));
-    v.push(Item::new(ID_SAVE_AS, Look::Text, None, "Save as…", "Save as  (Ctrl+Shift+S)"));
-    v.push(Item::new(ID_SAVE, Look::Primary, Some(Icon::Save), "Save", "Save  (Ctrl+S)"));
     v
+}
+
+/// Output actions live in a panel on the right.
+fn side_items() -> Vec<Item> {
+    vec![
+        Item::new(ID_SAVE, Look::Primary, Some(Icon::Save), "Save", "Save  (Ctrl+S)"),
+        Item::new(ID_COPY, Look::Stacked, Some(Icon::Copy), "Copy", "Copy image  (Ctrl+C)"),
+        Item::new(0, Look::Sep, None, "", ""),
+        Item::new(ID_SAVE_AS, Look::Stacked, Some(Icon::Folder), "Save as", "Save as  (Ctrl+Shift+S)"),
+        Item::new(ID_OCR, Look::Stacked, Some(Icon::Ocr), "Copy text", "Copy the text in this image (OCR)"),
+    ]
+}
+
+fn side_width(dpi: i32) -> i32 {
+    util::sc(100, dpi)
+}
+
+// ---- editable annotations ---------------------------------------------------
+
+const TOOL_NAMES: [(Tool, &str); 10] = [
+    (Tool::Arrow, "arrow"),
+    (Tool::Line, "line"),
+    (Tool::Rect, "rect"),
+    (Tool::Ellipse, "ellipse"),
+    (Tool::Pen, "pen"),
+    (Tool::Marker, "highlight"),
+    (Tool::Text, "text"),
+    (Tool::Step, "step"),
+    (Tool::Blur, "blur"),
+    (Tool::Spot, "spotlight"),
+];
+
+fn escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\n', "\\n").replace('\t', "\\t")
+}
+
+fn unescape(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' {
+            match it.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(o) => out.push(o),
+                None => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// One annotation per line, tab separated, so the files stay readable and diffable.
+fn serialize_annotations(items: &[Ann]) -> String {
+    let mut out = String::from("MonPresso annotations 1\n");
+    for a in items {
+        let Some((_, name)) = TOOL_NAMES.iter().find(|(t, _)| *t == a.tool) else { continue };
+        let pts: Vec<String> = a.pts.iter().map(|p| format!("{},{}", p.x, p.y)).collect();
+        out.push_str(&format!(
+            "{name}\t{}\t{}\t{}\t{}\t{:08X}\t{}\t{}\t{}\t{}\t{}\n",
+            a.a.x,
+            a.a.y,
+            a.b.x,
+            a.b.y,
+            a.color,
+            a.width,
+            a.size,
+            a.n,
+            pts.join(";"),
+            escape(&a.text)
+        ));
+    }
+    out
+}
+
+fn parse_annotations(text: &str) -> Vec<Ann> {
+    let mut lines = text.lines();
+    if !lines.next().is_some_and(|h| h.starts_with("MonPresso annotations")) {
+        return Vec::new();
+    }
+    let num = |s: &str| s.trim().parse::<f32>().ok();
+    lines
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.len() < 11 {
+                return None;
+            }
+            let tool = TOOL_NAMES.iter().find(|(_, n)| *n == f[0])?.0;
+            let pts = f[9]
+                .split(';')
+                .filter_map(|p| {
+                    let (x, y) = p.split_once(',')?;
+                    Some(P { x: num(x)?, y: num(y)? })
+                })
+                .collect();
+            Some(Ann {
+                tool,
+                a: P { x: num(f[1])?, y: num(f[2])? },
+                b: P { x: num(f[3])?, y: num(f[4])? },
+                pts,
+                text: unescape(f[10]),
+                n: f[8].trim().parse().ok()?,
+                color: u32::from_str_radix(f[5].trim(), 16).ok()?,
+                width: num(f[6])?,
+                size: num(f[7])?,
+            })
+        })
+        .collect()
 }
 
 impl Editor {
@@ -542,7 +654,10 @@ impl Editor {
         let (cw, ch) = util::client_size(self.hwnd);
         self.toolbar_h = self.bar.layout(self.hwnd, cw, self.dpi, &self.fonts);
         let status_h = self.sc(28);
-        util::move_win(self.canvas, 0, self.toolbar_h, cw, (ch - self.toolbar_h - status_h).max(1));
+        let side_w = side_width(self.dpi);
+        let body_h = (ch - self.toolbar_h - status_h).max(1);
+        self.side.layout_vertical(self.hwnd, cw - side_w, self.toolbar_h, side_w, body_h, self.dpi);
+        util::move_win(self.canvas, 0, self.toolbar_h, (cw - side_w).max(1), body_h);
         self.update_scrollbars();
         InvalidateRect(self.hwnd, null(), 0);
     }
@@ -669,6 +784,10 @@ impl Editor {
         let bar = Surface::new(cw, self.toolbar_h);
         self.bar.paint(&bar, self.dpi, &self.fonts);
         bar.present(hdc, 0, 0);
+        let (sx, sy) = self.side.origin();
+        let side = Surface::new(cw - sx, self.side.height);
+        self.side.paint(&side, self.dpi, &self.fonts);
+        side.present(hdc, sx, sy);
 
         let sh = self.sc(28);
         let st = Surface::new(cw, sh);
@@ -1048,6 +1167,13 @@ impl Editor {
             util::msgbox(self.hwnd, &format!("Could not save {path}"), MB_ICONERROR);
             return false;
         }
+        // Keep the original capture and the annotation list so they stay editable.
+        let image_path = std::path::Path::new(&path);
+        if self.doc.items.is_empty() {
+            crate::project::remove(image_path);
+        } else if !crate::project::save(image_path, &self.doc.base, &serialize_annotations(&self.doc.items)) {
+            util::msgbox(self.hwnd, "The image was saved, but its annotations could not be kept editable.", MB_ICONWARNING);
+        }
         self.path = Some(path.clone());
         self.dirty = false;
         self.update_title();
@@ -1342,21 +1468,27 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_ERASEBKGND => return 1,
         WM_MOUSEMOVE => {
             let (x, y) = util::point_from_lparam(lp);
-            if e.bar.mouse_move(hwnd, x, y) {
+            let (ox, oy) = e.side.origin();
+            let a = e.bar.mouse_move(hwnd, x, y);
+            let b = e.side.mouse_move(hwnd, x - ox, y - oy);
+            if a || b {
                 InvalidateRect(hwnd, null(), 0);
             }
             return 0;
         }
         0x02A3 => {
             // WM_MOUSELEAVE
-            if e.bar.mouse_leave() {
+            let a = e.bar.mouse_leave();
+            let b = e.side.mouse_leave();
+            if a || b {
                 InvalidateRect(hwnd, null(), 0);
             }
             return 0;
         }
         WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
             let (x, y) = util::point_from_lparam(lp);
-            if e.bar.mouse_down(x, y) {
+            let (ox, oy) = e.side.origin();
+            if e.bar.mouse_down(x, y) || e.side.mouse_down(x - ox, y - oy) {
                 SetCapture(hwnd);
                 InvalidateRect(hwnd, null(), 0);
             }
@@ -1364,8 +1496,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_LBUTTONUP => {
             let (x, y) = util::point_from_lparam(lp);
+            let (ox, oy) = e.side.origin();
             ReleaseCapture();
-            let clicked = e.bar.mouse_up(x, y);
+            let clicked = e.bar.mouse_up(x, y).or(e.side.mouse_up(x - ox, y - oy));
             InvalidateRect(hwnd, null(), 0);
             if let Some(id) = clicked {
                 e.command(id);
@@ -1572,6 +1705,39 @@ mod tests {
         let line = ann(Tool::Line, P { x: 0.0, y: 0.0 }, P { x: 100.0, y: 0.0 });
         assert!(line.hit(P { x: 50.0, y: 3.0 }, 2.0));
         assert!(!line.hit(P { x: 50.0, y: 20.0 }, 2.0));
+    }
+
+    #[test]
+    fn annotations_roundtrip_through_sidecar() {
+        gdip::startup();
+        let mut text = ann(Tool::Text, P { x: 12.5, y: 30.0 }, P { x: 12.5, y: 30.0 });
+        text.text = "Line one\twith tab\nline \\ two".into();
+        let mut pen = ann(Tool::Pen, P { x: 1.0, y: 2.0 }, P { x: 1.0, y: 2.0 });
+        pen.pts = vec![P { x: 1.0, y: 2.0 }, P { x: 3.5, y: 4.25 }];
+        let mut step = ann(Tool::Step, P { x: 40.0, y: 40.0 }, P { x: 40.0, y: 40.0 });
+        step.n = 7;
+        let items = vec![ann(Tool::Arrow, P { x: 0.0, y: 0.0 }, P { x: 20.0, y: 10.0 }), text, pen, step];
+        let back = parse_annotations(&serialize_annotations(&items));
+        assert_eq!(back.len(), items.len());
+        for (a, b) in items.iter().zip(&back) {
+            assert!(a.tool == b.tool && a.a == b.a && a.b == b.b && a.pts == b.pts);
+            assert_eq!((a.text.as_str(), a.n, a.color, a.width, a.size), (b.text.as_str(), b.n, b.color, b.width, b.size));
+        }
+
+        let dir = std::env::temp_dir().join(format!("monpresso-sidecar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("shot.png");
+        let base = checker(30, 20);
+        assert!(gdip::save_image(&render(&base, &back, None, None), &image.to_string_lossy()));
+        assert!(crate::project::save(&image, &base, &serialize_annotations(&back)));
+        assert!(crate::project::has(&image));
+        let (loaded, txt) = crate::project::load(&image).expect("sidecar");
+        assert_eq!(loaded.px, base.px);
+        assert_eq!(parse_annotations(&txt).len(), 4);
+        assert_eq!(crate::project::files(&image).len(), 2);
+        crate::project::remove(&image);
+        assert!(!crate::project::has(&image));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

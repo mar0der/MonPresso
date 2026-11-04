@@ -56,6 +56,9 @@ pub fn run() {
         let name = w("Local\\MonPresso.SingleInstance");
         let _mutex = CreateMutexW(null(), 1, name.as_ptr());
         if GetLastError() == ERROR_ALREADY_EXISTS {
+            if std::env::args().any(|a| a == "--tray") {
+                return; // started at sign-in while already running: stay quiet
+            }
             let class = w(MAIN_CLASS);
             let other = FindWindowW(class.as_ptr(), null());
             if !other.is_null() {
@@ -73,6 +76,9 @@ pub fn run() {
 
         let s = Settings::load();
         let _ = std::fs::create_dir_all(&s.save_folder);
+        if s.start_with_windows {
+            s.apply_startup(); // keep the Run entry pointing at this exe and approved
+        }
         SETTINGS.with(|c| *c.borrow_mut() = s);
 
         util::register_class(MAIN_CLASS, Some(main_proc), null_mut(), false);
