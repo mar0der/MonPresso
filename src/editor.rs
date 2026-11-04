@@ -62,7 +62,7 @@ enum Tool {
 }
 
 const TOOLS: [(Tool, &str, u8, &str, Icon); 12] = [
-    (Tool::Select, "Select", b'V', "Click to select, drag to move, Delete removes, double-click text to edit", Icon::Select),
+    (Tool::Select, "Select", b'V', "Click to select, drag to move or reshape, Delete removes, double-click text to edit (Esc gets you here)", Icon::Select),
     (Tool::Arrow, "Arrow", b'A', "Drag to draw an arrow (Shift snaps to 45°)", Icon::Arrow),
     (Tool::Line, "Line", b'L', "Drag to draw a line (Shift snaps to 45°)", Icon::Line),
     (Tool::Rect, "Rectangle", b'R', "Drag to draw a rectangle (Shift for a square)", Icon::Rect),
@@ -578,7 +578,8 @@ fn toolbar_items() -> Vec<Item> {
     let sep = || Item::new(0, Look::Sep, None, "", "");
     let mut v = Vec::new();
     for (i, t) in TOOLS.iter().enumerate() {
-        v.push(Item::new(ID_TOOL + i as i32, Look::Icon, Some(t.4), "", &format!("{}  ({})", t.1, t.2 as char)));
+        let keys = if t.0 == Tool::Select { format!("{} or Esc", t.2 as char) } else { (t.2 as char).to_string() };
+        v.push(Item::new(ID_TOOL + i as i32, Look::Icon, Some(t.4), "", &format!("{}  ({keys})", t.1)));
     }
     v.push(sep());
     for (i, c) in SWATCHES.iter().enumerate() {
@@ -1501,11 +1502,28 @@ impl Editor {
         match vk {
             VK_DELETE | VK_BACK => self.delete_selected(),
             VK_ESCAPE => {
-                if !matches!(self.drag, Drag::None) {
-                    ReleaseCapture();
-                    self.drag = Drag::None;
+                match std::mem::replace(&mut self.drag, Drag::None) {
+                    // Nothing in progress: back to the Select tool to move what was added
+                    // (the last shape stays selected); in Select mode, Esc deselects.
+                    Drag::None => {
+                        if self.tool != Tool::Select {
+                            self.set_tool(Tool::Select);
+                        } else {
+                            self.selected = None;
+                        }
+                    }
+                    // Cancel a move or reshape: put the shape back where it was.
+                    Drag::Move { was_dirty, .. } | Drag::Handle { was_dirty, .. } => {
+                        ReleaseCapture();
+                        if let Some(d) = self.undo.pop() {
+                            self.doc = d;
+                        }
+                        self.dirty = was_dirty;
+                    }
+                    Drag::Draw(_) | Drag::Crop { .. } => {
+                        ReleaseCapture();
+                    }
                 }
-                self.selected = None;
                 self.changed();
             }
             _ => return false,
