@@ -27,6 +27,12 @@ pub struct Settings {
     pub hotkey_window: String,
     pub hotkey_last_area: String,
     pub hotkey_record: String,
+    /// Capture an area and paste it into the Claude / Codex chat box.
+    pub hotkey_claude: String,
+    pub hotkey_codex: String,
+    /// Matched (case-insensitively) against the full path of the target app's exe.
+    pub claude_app: String,
+    pub codex_app: String,
     pub ffmpeg_path: String,
     pub video_format: String,
     pub video_fps: u32,
@@ -47,6 +53,10 @@ impl Default for Settings {
             hotkey_window: "Alt+PrintScreen".into(),
             hotkey_last_area: "Shift+PrintScreen".into(),
             hotkey_record: "Ctrl+Shift+PrintScreen".into(),
+            hotkey_claude: String::new(),
+            hotkey_codex: String::new(),
+            claude_app: "\\claude.exe".into(),
+            codex_app: "openai.codex".into(),
             ffmpeg_path: String::new(),
             video_format: "mp4".into(),
             video_fps: 30,
@@ -99,6 +109,10 @@ impl Settings {
                 "hotkey_window" => s.hotkey_window = v,
                 "hotkey_last_area" => s.hotkey_last_area = v,
                 "hotkey_record" => s.hotkey_record = v,
+                "hotkey_claude" => s.hotkey_claude = v,
+                "hotkey_codex" => s.hotkey_codex = v,
+                "claude_app" if !v.is_empty() => s.claude_app = v,
+                "codex_app" if !v.is_empty() => s.codex_app = v,
                 "ffmpeg_path" => s.ffmpeg_path = v,
                 "video_format" => s.video_format = if v == "gif" { v } else { "mp4".into() },
                 "video_fps" => s.video_fps = v.parse().unwrap_or(30).clamp(5, 60),
@@ -117,7 +131,8 @@ impl Settings {
         let text = format!(
             "save_folder={}\nimage_format={}\ncopy_to_clipboard={}\nopen_editor={}\ninclude_cursor={}\n\
              delay_seconds={}\nhotkey_area={}\nhotkey_fullscreen={}\nhotkey_window={}\nhotkey_last_area={}\n\
-             hotkey_record={}\nffmpeg_path={}\nvideo_format={}\nvideo_fps={}\nstart_with_windows={}\n",
+             hotkey_record={}\nhotkey_claude={}\nhotkey_codex={}\nclaude_app={}\ncodex_app={}\n\
+             ffmpeg_path={}\nvideo_format={}\nvideo_fps={}\nstart_with_windows={}\n",
             self.save_folder,
             self.image_format,
             self.copy_to_clipboard,
@@ -129,6 +144,10 @@ impl Settings {
             self.hotkey_window,
             self.hotkey_last_area,
             self.hotkey_record,
+            self.hotkey_claude,
+            self.hotkey_codex,
+            self.claude_app,
+            self.codex_app,
             self.ffmpeg_path,
             self.video_format,
             self.video_fps,
@@ -192,7 +211,15 @@ const ID_STARTUP: i32 = 34;
 
 const DELAYS: [u32; 6] = [0, 1, 2, 3, 5, 10];
 const FPS: [u32; 4] = [15, 24, 30, 60];
-const HOTKEY_LABELS: [&str; 5] = ["Capture area", "Full screen", "Active window", "Repeat last area", "Start / stop recording"];
+const HOTKEY_LABELS: [&str; 7] = [
+    "Capture area",
+    "Full screen",
+    "Active window",
+    "Repeat last area",
+    "Start / stop recording",
+    "Area → paste in Claude",
+    "Area → paste in Codex",
+];
 
 struct Dialog {
     fonts: crate::ui::Fonts,
@@ -308,7 +335,15 @@ unsafe fn build(hwnd: HWND, d: &mut Dialog, s: &Settings, dpi: i32) {
     y += sc(30);
     place(hint("Type a combination such as Ctrl+Shift+S or PrintScreen. Leave empty to disable."), lx, y, width - lx * 2, sc(18));
     y += sc(28);
-    let values = [&s.hotkey_area, &s.hotkey_fullscreen, &s.hotkey_window, &s.hotkey_last_area, &s.hotkey_record];
+    let values = [
+        &s.hotkey_area,
+        &s.hotkey_fullscreen,
+        &s.hotkey_window,
+        &s.hotkey_last_area,
+        &s.hotkey_record,
+        &s.hotkey_claude,
+        &s.hotkey_codex,
+    ];
     for (i, (name, value)) in HOTKEY_LABELS.iter().zip(values).enumerate() {
         field_label(name, y);
         place(edit(value, ID_HK_BASE + i as i32), cx, y, sc(220), sc(26));
@@ -381,7 +416,7 @@ unsafe fn collect(hwnd: HWND) -> Result<Settings, String> {
     s.include_cursor = checked(hwnd, ID_CURSOR);
     s.start_with_windows = checked(hwnd, ID_STARTUP);
     let mut hk = Vec::new();
-    for i in 0..5 {
+    for i in 0..HOTKEY_LABELS.len() as i32 {
         let text = util::get_text(control(hwnd, ID_HK_BASE + i)).trim().to_string();
         crate::hotkey::parse(&text)?;
         hk.push(text);
@@ -391,6 +426,8 @@ unsafe fn collect(hwnd: HWND) -> Result<Settings, String> {
     s.hotkey_window = hk[2].clone();
     s.hotkey_last_area = hk[3].clone();
     s.hotkey_record = hk[4].clone();
+    s.hotkey_claude = hk[5].clone();
+    s.hotkey_codex = hk[6].clone();
     s.ffmpeg_path = util::get_text(control(hwnd, ID_FFMPEG)).trim().to_string();
     s.video_format = if selected(hwnd, ID_VFORMAT) == 1 { "gif" } else { "mp4" }.into();
     s.video_fps = FPS[selected(hwnd, ID_FPS).min(FPS.len() - 1)];

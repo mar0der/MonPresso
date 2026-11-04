@@ -516,7 +516,7 @@ fn toolbar_items() -> Vec<Item> {
     v
 }
 
-/// Output actions live in a panel on the right.
+/// Output actions live in a panel on the left.
 fn side_items() -> Vec<Item> {
     vec![
         Item::new(ID_SAVE, Look::Primary, Some(Icon::Save), "Save", "Save  (Ctrl+S)"),
@@ -656,8 +656,8 @@ impl Editor {
         let status_h = self.sc(28);
         let side_w = side_width(self.dpi);
         let body_h = (ch - self.toolbar_h - status_h).max(1);
-        self.side.layout_vertical(self.hwnd, cw - side_w, self.toolbar_h, side_w, body_h, self.dpi);
-        util::move_win(self.canvas, 0, self.toolbar_h, (cw - side_w).max(1), body_h);
+        self.side.layout_vertical(self.hwnd, 0, self.toolbar_h, side_w, body_h, self.dpi);
+        util::move_win(self.canvas, side_w, self.toolbar_h, (cw - side_w).max(1), body_h);
         self.update_scrollbars();
         InvalidateRect(self.hwnd, null(), 0);
     }
@@ -785,7 +785,7 @@ impl Editor {
         self.bar.paint(&bar, self.dpi, &self.fonts);
         bar.present(hdc, 0, 0);
         let (sx, sy) = self.side.origin();
-        let side = Surface::new(cw - sx, self.side.height);
+        let side = Surface::new(side_width(self.dpi), self.side.height);
         self.side.paint(&side, self.dpi, &self.fonts);
         side.present(hdc, sx, sy);
 

@@ -676,7 +676,7 @@ impl Bar {
             let c = s.canvas();
             if self.vertical {
                 c.fill_rect(RectF { x: 0.0, y: 0.0, w: s.w as f32, h: s.h as f32 }, theme::PANEL);
-                c.fill_rect(RectF { x: 0.0, y: 0.0, w: 1.0, h: s.h as f32 }, theme::BORDER);
+                c.fill_rect(RectF { x: s.w as f32 - 1.0, y: 0.0, w: 1.0, h: s.h as f32 }, theme::BORDER);
             } else {
                 c.fill_rect(RectF { x: 0.0, y: 0.0, w: s.w as f32, h: self.height as f32 }, theme::PANEL);
                 c.fill_rect(RectF { x: 0.0, y: self.height as f32 - 1.0, w: s.w as f32, h: 1.0 }, theme::BORDER);

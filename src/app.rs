@@ -6,9 +6,9 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::System::Threading::{CreateMutexW, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows_sys::Win32::UI::Controls::{InitCommonControlsEx, ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{keybd_event, RegisterHotKey, UnregisterHotKey, KEYEVENTF_KEYUP, VK_CONTROL};
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -32,6 +32,10 @@ pub enum Kind {
     FullScreen,
     ActiveWindow,
     LastArea,
+    /// Capture an area and paste it into the Claude chat box.
+    ToClaude,
+    /// Capture an area and paste it into the Codex chat box.
+    ToCodex,
 }
 
 thread_local! {
@@ -162,6 +166,8 @@ fn register_hotkeys(report: bool) {
         (3, &s.hotkey_window, "Active window"),
         (4, &s.hotkey_last_area, "Repeat last area"),
         (5, &s.hotkey_record, "Recording"),
+        (6, &s.hotkey_claude, "Area to Claude"),
+        (7, &s.hotkey_codex, "Area to Codex"),
     ];
     let mut failed = Vec::new();
     for (id, text, name) in keys {
@@ -258,12 +264,102 @@ pub fn capture(kind: Kind, from_ui: bool) {
             Some(r) => Some(image::capture(r, s.include_cursor)),
             None => select_area_image(),
         },
-        Kind::Area => select_area_image(),
+        Kind::Area | Kind::ToClaude | Kind::ToCodex => select_area_image(),
     };
     restore_workspace(hidden);
     BUSY.with(|b| b.set(false));
-    if let Some(img) = img {
-        handle_capture(img, &s);
+    let Some(img) = img else { return };
+    match kind {
+        Kind::ToClaude => send_to_app(img, &s, &s.claude_app, "Claude"),
+        Kind::ToCodex => send_to_app(img, &s, &s.codex_app, "Codex"),
+        _ => handle_capture(img, &s),
+    }
+}
+
+struct AppSearch {
+    needle: String,
+    found: HWND,
+}
+
+unsafe fn process_path(pid: u32) -> String {
+    let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    if h.is_null() {
+        return String::new();
+    }
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) != 0;
+    CloseHandle(h);
+    if ok { String::from_utf16_lossy(&buf[..len as usize]) } else { String::new() }
+}
+
+unsafe extern "system" fn find_app_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let search = &mut *(lparam as *mut AppSearch);
+    if IsWindowVisible(hwnd) == 0 || GetWindowTextLengthW(hwnd) == 0 || !GetWindow(hwnd, GW_OWNER).is_null() {
+        return 1;
+    }
+    if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW != 0 {
+        return 1;
+    }
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, &mut pid);
+    if process_path(pid).to_ascii_lowercase().contains(&search.needle) {
+        search.found = hwnd;
+        return 0;
+    }
+    1
+}
+
+/// The front-most main window of the app whose exe path contains `needle`.
+fn find_app_window(needle: &str) -> Option<HWND> {
+    let mut search = AppSearch { needle: needle.to_ascii_lowercase(), found: null_mut() };
+    unsafe { EnumWindows(Some(find_app_proc), &mut search as *mut AppSearch as LPARAM) };
+    (!search.found.is_null()).then_some(search.found)
+}
+
+unsafe fn pid_of(hwnd: HWND) -> u32 {
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, &mut pid);
+    pid
+}
+
+/// Save the capture, put it on the clipboard, bring the app forward and paste it.
+fn send_to_app(img: Image, s: &Settings, needle: &str, name: &str) {
+    let _ = std::fs::create_dir_all(&s.save_folder);
+    let path = new_path(&s.save_folder, if s.image_format == "jpg" { "jpg" } else { "png" });
+    gdip::save_image(&img, &path);
+    workspace::refresh();
+    if !clipboard::set_image(main_hwnd(), &img) {
+        util::msgbox(null_mut(), "Could not put the capture on the clipboard.", MB_ICONWARNING);
+        return;
+    }
+    let Some(target) = find_app_window(needle) else {
+        balloon(&format!("{name} is not open"), "The capture is on the clipboard. Paste it with Ctrl+V.");
+        return;
+    };
+    unsafe {
+        if IsIconic(target) != 0 {
+            ShowWindow(target, SW_RESTORE);
+        }
+        SetForegroundWindow(target);
+        // Give the app a moment to take focus and restore its text box.
+        let mut ok = false;
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            if pid_of(GetForegroundWindow()) == pid_of(target) {
+                ok = true;
+                break;
+            }
+        }
+        if !ok {
+            balloon(&format!("Could not switch to {name}"), "The capture is on the clipboard. Paste it with Ctrl+V.");
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        keybd_event(VK_CONTROL as u8, 0, 0, 0);
+        keybd_event(b'V', 0, 0, 0);
+        keybd_event(b'V', 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(VK_CONTROL as u8, 0, KEYEVENTF_KEYUP, 0);
     }
 }
 
@@ -460,6 +556,8 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 3 => capture(Kind::ActiveWindow, false),
                 4 => capture(Kind::LastArea, false),
                 5 => toggle_recording(),
+                6 => capture(Kind::ToClaude, false),
+                7 => capture(Kind::ToCodex, false),
                 _ => {}
             }
             return 0;
