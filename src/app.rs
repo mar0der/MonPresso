@@ -55,7 +55,27 @@ fn main_hwnd() -> HWND {
     MAIN.with(|m| m.get())
 }
 
+/// When MonPresso is started by a Store app (for example from a terminal inside the Claude
+/// app), Windows silently redirects its AppData and HKCU writes into that app's private
+/// storage: settings and the start-with-Windows entry would be invisible to the rest of
+/// Windows. Restart through Explorer, which always runs it as a normal desktop program.
+fn relaunch_outside_package() -> bool {
+    use windows_sys::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+    unsafe {
+        let mut len = 0u32;
+        if GetCurrentPackageFullName(&mut len, null_mut()) == APPMODEL_ERROR_NO_PACKAGE {
+            return false;
+        }
+        let Ok(exe) = std::env::current_exe() else { return false };
+        let (op, explorer, arg) = (w("open"), w("explorer.exe"), w(&format!("\"{}\"", exe.display())));
+        ShellExecuteW(null_mut(), op.as_ptr(), explorer.as_ptr(), arg.as_ptr(), null(), SW_SHOWNORMAL) as isize > 32
+    }
+}
+
 pub fn run() {
+    if relaunch_outside_package() {
+        return;
+    }
     unsafe {
         let name = w("Local\\MonPresso.SingleInstance");
         let _mutex = CreateMutexW(null(), 1, name.as_ptr());
