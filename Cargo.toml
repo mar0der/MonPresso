@@ -1,6 +1,6 @@
 [package]
 name = "monpresso"
-version = "26.45.1"
+version = "26.45.2"
 edition = "2021"
 description = "Lightweight open-source screenshot and annotation tool for Windows"
 license = "MIT"
